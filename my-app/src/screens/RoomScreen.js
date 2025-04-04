@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'; 
+import React, { useState, useEffect, useRef } from 'react'; 
 import { View, Text, FlatList, TextInput, StyleSheet, TouchableOpacity, Alert, Switch, ScrollView } from 'react-native'; 
 import axios from 'axios'; 
 import AsyncStorage from '@react-native-async-storage/async-storage'; 
@@ -11,14 +11,56 @@ export default function RoomScreen({ navigation }) {
   const [isPrivate, setIsPrivate] = useState(false);
   const [password, setPassword] = useState('');
   const [showCreateForm, setShowCreateForm] = useState(false);
+  const websocket = useRef(null);
 
   useEffect(() => {     
     const loadUser = async () => {       
       const user = await AsyncStorage.getItem('user');       
-      setUsername(user);     
-    };     
+      setUsername(user);
+      
+      // Connect to WebSocket
+      const ws = new WebSocket(`${API_URL.replace('http', 'ws')}`);
+      
+      ws.onopen = () => {
+        console.log('WebSocket connected');
+        // Send a join message without a specific room
+        ws.send(JSON.stringify({
+          type: 'join',
+          username: user,
+          room: 'lobby' // Use a generic room name for users not in a specific chat room
+        }));
+      };
+      
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        
+        // Handle room updates
+        if (data.type === 'rooms_update') {
+          console.log('Received rooms update:', data.rooms);
+          setRooms(data.rooms);
+        }
+      };
+      
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+      };
+      
+      ws.onclose = () => {
+        console.log('WebSocket disconnected');
+      };
+      
+      websocket.current = ws;
+    };
+    
     loadUser();     
-    fetchRooms();   
+    fetchRooms();
+    
+    // Clean up WebSocket connection on unmount
+    return () => {
+      if (websocket.current) {
+        websocket.current.close();
+      }
+    };
   }, []);    
 
   const fetchRooms = async () => {     
@@ -52,7 +94,7 @@ export default function RoomScreen({ navigation }) {
       setPassword('');
       setIsPrivate(false);
       setShowCreateForm(false);
-      fetchRooms();     
+      // No need to fetch rooms manually as we'll get a WebSocket update
     } catch (error) {       
       Alert.alert('Error', error.response?.data?.error || 'Failed to create room');     
     }   
@@ -60,16 +102,16 @@ export default function RoomScreen({ navigation }) {
 
   const deleteRoom = async (roomName) => {     
     try {       
-      await axios.delete(`${API_URL}/rooms`, { data: { room: roomName, username } });       
-      fetchRooms();     
+      await axios.delete(`${API_URL}/rooms`, { data: { room: roomName, username } });
+      // No need to fetch rooms manually as we'll get a WebSocket update       
     } catch (error) {       
       Alert.alert('Error', error.response?.data?.error || 'Failed to delete room');     
     }   
   };
 
   const handleJoinRoom = (item) => {
-    if (item.isPrivate && item.admin !== username) {
-      // Ask for password if room is private and user is not the admin
+    if (item.isPrivate && item.admin !== username && !item.members.includes(username)) {
+      // Ask for password if room is private and user is not the admin or already a member
       Alert.prompt(
         'Private Room',
         'Please enter the password to join this room:',
@@ -100,7 +142,7 @@ export default function RoomScreen({ navigation }) {
         'secure-text'
       );
     } else {
-      // Public room or user is the admin - join directly
+      // Public room or user is the admin/member - join directly
       navigation.navigate('Chat', { room: item.name });
     }
   };

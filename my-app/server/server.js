@@ -4,13 +4,15 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+require('dotenv').config();
 
 const app = express();
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(cors());
 
-const HTTP_PORT = 3001;
-const WS_PORT = 3002;
+// Use Railway's provided PORT or default to 3001
+const HTTP_PORT = process.env.PORT || 3001;
+const WS_PORT = process.env.WS_PORT || 3002;
 
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
@@ -46,6 +48,20 @@ const saveData = () => {
 
 loadData();
 
+// Function to broadcast room updates to all connected clients
+const broadcastRooms = () => {
+  const roomsUpdate = {
+    type: 'rooms_update',
+    rooms: rooms
+  };
+  
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify(roomsUpdate));
+    }
+  });
+};
+
 app.post('/register', (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Invalid credentials' });
@@ -70,7 +86,7 @@ app.post('/upload', (req, res) => {
     const buffer = Buffer.from(file, 'base64');
     const filePath = path.join(uploadsDir, filename);
     fs.writeFileSync(filePath, buffer);
-    res.json({ url: `http://192.168.244.197:3001/uploads/${filename}` });
+    res.json({ url: `${process.env.API_URL}/uploads/${filename}` });
   } catch (error) {
     console.error('Upload error:', error);
     res.status(500).json({ error: 'File upload failed' });
@@ -100,142 +116,98 @@ app.post('/rooms', (req, res) => {
   
   messages[room] = messages[room] || [];
   saveData();
+  
+  // Broadcast room update to all clients
+  broadcastRooms();
+  
   res.status(201).json({ message: 'Room created' });
 });
 
+// Add endpoint for joining private rooms
 app.post('/joinRoom', (req, res) => {
   const { room, username, password } = req.body;
-  const roomData = rooms.find(r => r.name === room);
-  
-  if (!roomData) {
+  const foundRoom = rooms.find(r => r.name === room);
+
+  if (!foundRoom) {
     return res.status(404).json({ error: 'Room not found' });
   }
-  
-  if (roomData.isPrivate && roomData.password !== password && roomData.admin !== username) {
-    return res.status(403).json({ error: 'Incorrect password' });
+
+  if (foundRoom.isPrivate && foundRoom.password !== password && foundRoom.admin !== username) {
+    return res.status(401).json({ error: 'Incorrect password' });
   }
-  
-  // Add user to room members if not already there
-  if (!roomData.members.includes(username)) {
-    roomData.members.push(username);
+
+  // Add user to room members if not already a member
+  if (!foundRoom.members.includes(username)) {
+    foundRoom.members.push(username);
     saveData();
   }
-  
-  res.json({ success: true, message: 'Joined room successfully' });
+
+  res.json({ success: true });
 });
 
+// Add endpoint for deleting rooms
 app.delete('/rooms', (req, res) => {
   const { room, username } = req.body;
   const roomIndex = rooms.findIndex(r => r.name === room);
-  if (roomIndex === -1) return res.status(404).json({ error: 'Room not found' });
-  if (rooms[roomIndex].admin !== username) return res.status(403).json({ error: 'Not authorized' });
-  
+
+  if (roomIndex === -1) {
+    return res.status(404).json({ error: 'Room not found' });
+  }
+
+  if (rooms[roomIndex].admin !== username) {
+    return res.status(403).json({ error: 'Only the room admin can delete this room' });
+  }
+
   rooms.splice(roomIndex, 1);
   delete messages[room];
   saveData();
   
-  wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(JSON.stringify({ type: 'roomDeleted', room }));
-    }
-  });
+  // Broadcast room update to all clients
+  broadcastRooms();
   
   res.json({ message: 'Room deleted' });
 });
 
-app.get('/messages', (req, res) => {
-  const { room } = req.query;
-  res.json(messages[room] || []);
-});
+const server = app.listen(HTTP_PORT, () => console.log(`HTTP Server running on port ${HTTP_PORT}`));
 
-const wss = new WebSocket.Server({ port: WS_PORT });
+const wss = new WebSocket.Server({ server });
 
 wss.on('connection', (ws) => {
   ws.on('message', (data) => {
     try {
       const message = JSON.parse(data);
-      switch(message.type) {
-        case 'join':
-          if (!users.some(u => u.username === message.username)) return;
-          
-          // Check if private room and user has access
-          const roomToJoin = rooms.find(r => r.name === message.room);
-          if (roomToJoin && roomToJoin.isPrivate && 
-              !roomToJoin.members.includes(message.username) && 
-              roomToJoin.admin !== message.username) {
-            // Don't allow joining if user is not a member or admin of private room
-            ws.send(JSON.stringify({
-              type: 'error',
-              message: 'Password required to join this room'
-            }));
-            return;
+      if (message.type === 'join') {
+        ws.username = message.username;
+        ws.room = message.room;
+        activeUsers.add(message.username);
+        
+        // Send rooms list to newly connected user
+        ws.send(JSON.stringify({
+          type: 'rooms_update',
+          rooms: rooms
+        }));
+      } else if (message.type === 'message') {
+        messages[ws.room] = messages[ws.room] || [];
+        messages[ws.room].push(message);
+        saveData();
+        
+        // Broadcast chat message to clients in the same room
+        wss.clients.forEach(client => {
+          if (client.readyState === WebSocket.OPEN && client.room === ws.room) {
+            client.send(JSON.stringify(message));
           }
-          
-          ws.username = message.username;
-          ws.room = message.room;
-          activeUsers.add(message.username);
-          
-          // For private chats, use the sorted usernames as the room ID
-          const roomId = ws.room.includes('Chat with') && message.recipient 
-            ? [message.username, message.recipient].sort().join('-') 
-            : ws.room;
-            
-          const roomMessages = messages[roomId] || [];
-          ws.send(JSON.stringify({
-            type: 'history',
-            messages: roomMessages
-          }));
-          
-          broadcast({ type: 'userUpdate', users: Array.from(activeUsers) });
-          break;
-
-        case 'public':
-          if (!ws.room || !ws.username) return;
-          
-          // Check if the user has access to this room
-          const currentRoom = rooms.find(r => r.name === ws.room);
-          if (currentRoom && currentRoom.isPrivate && 
-              !currentRoom.members.includes(ws.username) && 
-              currentRoom.admin !== ws.username) {
-            return; // No access to send messages
+        });
+        
+        return; // Skip the broadcast at the end since we already sent to room clients
+      }
+      
+      // For other message types (non-chat messages), broadcast to all clients
+      if (message.type !== 'message') {
+        wss.clients.forEach(client => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify(message));
           }
-          
-          messages[ws.room] = messages[ws.room] || [];
-          const msgExists = messages[ws.room].some(m => 
-            m.timestamp === message.timestamp && m.sender === message.sender);
-          
-          if (!msgExists) {
-            messages[ws.room].push(message);
-            saveData();
-            broadcastToRoom(ws.room, message);
-          }
-          break;
-
-        case 'private':
-          const participants = [message.sender, message.recipient].sort();
-          const chatId = participants.join('-');
-          messages[chatId] = messages[chatId] || [];
-          
-          // Check if message already exists
-          const privateExists = messages[chatId].some(m => 
-            m.timestamp === message.timestamp && m.sender === message.sender);
-            
-          if (!privateExists) {
-            messages[chatId].push(message);
-            saveData();
-            
-            // Send to recipient
-            sendPrivateMessage(message.recipient, message);
-            
-            // Echo back to sender for confirmation
-            wss.clients.forEach(client => {
-              if (client.readyState === WebSocket.OPEN && 
-                  client.username === message.sender) {
-                client.send(JSON.stringify(message));
-              }
-            });
-          }
-          break;
+        });
       }
     } catch (error) {
       console.error('WS error:', error);
@@ -243,37 +215,6 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    if (ws.username) {
-      activeUsers.delete(ws.username);
-      broadcast({ type: 'userUpdate', users: Array.from(activeUsers) });
-      saveData();
-    }
+    if (ws.username) activeUsers.delete(ws.username);
   });
 });
-
-function broadcast(message) {
-  wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(JSON.stringify(message));
-    }
-  });
-}
-
-function broadcastToRoom(room, message) {
-  wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN && client.room === room) {
-      client.send(JSON.stringify(message));
-    }
-  });
-}
-
-function sendPrivateMessage(recipient, message) {
-  wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN && client.username === recipient) {
-      client.send(JSON.stringify(message));
-    }
-  });
-}
-
-app.listen(HTTP_PORT, () => console.log(`HTTP Server: ${HTTP_PORT}`));
-wss.on('listening', () => console.log(`WS Server: ${WS_PORT}`));
