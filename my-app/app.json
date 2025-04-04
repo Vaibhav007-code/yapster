@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "my-app",
-    "slug": "my-app",
+    "name": "YAPSTER",
+    "slug": "YAPSTER",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/yapster-icon.png",
