@@ -8,12 +8,16 @@ require('dotenv').config();
 
 const app = express();
 app.use(bodyParser.json({ limit: '50mb' }));
-app.use(cors());
+app.use(cors({
+  origin: '*', // Allow all origins in development, restrict in production
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
-// Use Railway's provided PORT or default to 3001
-const HTTP_PORT = process.env.PORT || 3001;
-const WS_PORT = process.env.WS_PORT || 3002;
+// FIXED: Using a single port for both HTTP and WebSocket to avoid connectivity issues
+const PORT = process.env.PORT || 3001;
 
+// Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir);
@@ -86,7 +90,7 @@ app.post('/upload', (req, res) => {
     const buffer = Buffer.from(file, 'base64');
     const filePath = path.join(uploadsDir, filename);
     fs.writeFileSync(filePath, buffer);
-    res.json({ url: `${process.env.API_URL}/uploads/${filename}` });
+    res.json({ url: `/uploads/${filename}` }); // FIXED: Use relative URL
   } catch (error) {
     console.error('Upload error:', error);
     res.status(500).json({ error: 'File upload failed' });
@@ -168,11 +172,20 @@ app.delete('/rooms', (req, res) => {
   res.json({ message: 'Room deleted' });
 });
 
-const server = app.listen(HTTP_PORT, () => console.log(`HTTP Server running on port ${HTTP_PORT}`));
+// ADDED: Health check endpoint to test connectivity
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
 
+// FIXED: Create HTTP server and attach WebSocket server to it
+const server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+// FIXED: WebSocket server using the same HTTP server
 const wss = new WebSocket.Server({ server });
 
 wss.on('connection', (ws) => {
+  console.log('New WebSocket connection established');
+  
   ws.on('message', (data) => {
     try {
       const message = JSON.parse(data);
@@ -216,5 +229,9 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     if (ws.username) activeUsers.delete(ws.username);
+    console.log('WebSocket connection closed');
   });
+  
+  // ADDED: Send connection confirmation
+  ws.send(JSON.stringify({ type: 'connected', message: 'Successfully connected to server' }));
 });

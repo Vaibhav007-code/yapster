@@ -14,6 +14,12 @@
       "adaptiveIcon": {
         "foregroundImage": "./assets/yapster-icon.png",
         "backgroundColor": "#ffffff"
+      },
+      "package": "com.vaibhav09.myapp"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "285cc707-47d5-4d9c-8535-47f745c0f736"
       }
     }
   }
